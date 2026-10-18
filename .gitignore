@@ -1,0 +1,42 @@
+﻿# Secrets and environment variables
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node.js and frontend builds
+node_modules/
+dist/
+build/
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary debugging and patch scripts
+backend/cleanup_debug.py
+backend/debug_v2.py
+backend/debug_v3.py
+backend/patch_debug.py
+backend/patch_fix.py
+backend/repro_debug.py
+backend/repro_scan.py
+backend/verify_fix.py
+
+# Private AI development instructions
+/CLAUDE.md
+
+# Local Ollama configuration
+/Modelfile
