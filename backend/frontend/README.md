@@ -1,32 +1,24 @@
-# React + TypeScript + Vite
+# Sentinel Zero — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The React + TypeScript + Vite dashboard for Sentinel Zero. See the
+[main README](../../README.md) for the full project description and setup.
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```powershell
+npm install
+Copy-Item .env.example .env   # sets VITE_API_BASE_URL (default http://localhost:8000)
+npm run dev                   # http://localhost:5173
+npm run build                 # type-check and build into dist/
+npm run lint
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+| Folder | Contents |
+|---|---|
+| `src/pages/` | `DashboardPage.tsx`: the single page, its state and the scan form |
+| `src/components/` | Navbar, Footer, Layout |
+| `src/components/report/` | Summary, severity badge, finding card, findings section, TLS details |
+| `src/services/api.ts` | Calls to `/health` and `/scan`, and readable error messages |
+| `src/utils/` | URL checks before scanning; grouping, sorting and counting findings |
+| `src/types/` | TypeScript types matching the backend's JSON |
+
+The dashboard only displays what the backend returns; it never invents scores
+or certificate data.
