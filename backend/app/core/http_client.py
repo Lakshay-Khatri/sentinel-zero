@@ -3,6 +3,17 @@ import ssl
 from typing import Optional
 from app.core.validator import validate_target, SecurityValidationError
 
+# Headers describing how the body was encoded on the wire. They no longer
+# match once httpx has decoded the body, so they are removed on reconstruction.
+_TRANSPORT_HEADERS = {"content-encoding", "content-length", "transfer-encoding"}
+
+
+def _strip_transport_headers(headers) -> httpx.Headers:
+    """Copy headers (keeping duplicates such as Set-Cookie) minus transport headers."""
+    return httpx.Headers(
+        [(k, v) for k, v in httpx.Headers(headers).multi_items() if k.lower() not in _TRANSPORT_HEADERS]
+    )
+
 class SecureHTTPClient:
     """
     A hardened HTTP client for passive security scanning.
@@ -48,12 +59,13 @@ class SecureHTTPClient:
                             raise SecurityValidationError("Response body too large (streamed).")
 
                     # We reconstruct a response object for the analyzers to use.
-                    # To prevent httpx from attempting to decode already-decoded bytes,
-                    # we create a new response with no headers that might trigger decoding.
-
+                    # aiter_bytes() has already decompressed the body, so we must drop
+                    # the transport headers that describe the *original* encoded body.
+                    # Otherwise httpx tries to gunzip plain bytes again (DecodingError).
+                    # Every other header (security headers, repeated Set-Cookie) is kept.
                     return httpx.Response(
                         status_code=response.status_code,
-                        headers={},
+                        headers=_strip_transport_headers(response.headers),
                         content=bytes(body),
                         request=response.request
                     )

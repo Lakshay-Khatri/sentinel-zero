@@ -239,3 +239,80 @@ def test_ssl_analyzer_http_detection():
     findings = analyze_ssl("http://example.com", mock_resp)
     assert len(findings) == 1
     assert findings[0].id == "NO_HTTPS"
+def test_http_client_preserves_response_headers_and_multiple_cookies():
+    """Verify that the HTTP client preserves security headers and Set-Cookie values."""
+    import asyncio
+
+    client = SecureHTTPClient()
+    url = "https://example.com"
+
+    async def mock_aiter():
+        yield b"test body"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = httpx.Headers([
+        ("Content-Security-Policy", "default-src 'self'"),
+        ("Set-Cookie", "session=abc; HttpOnly; Secure; SameSite=Lax"),
+        ("Set-Cookie", "preferences=dark; Secure; SameSite=Strict"),
+    ])
+    mock_resp.request = httpx.Request("GET", url)
+    mock_resp.aiter_bytes = mock_aiter
+
+    async def mock_stream(*args, **kwargs):
+        return mock_resp
+
+    with patch(
+        "app.core.http_client.validate_target",
+        return_value=("https", "93.184.216.34"),
+    ), patch("httpx.AsyncClient.stream") as mock_stream_method:
+        mock_stream_method.return_value.__aenter__.return_value = mock_resp
+
+        response = asyncio.run(client.request("GET", url))
+
+    assert response.headers["Content-Security-Policy"] == "default-src 'self'"
+    cookies = response.headers.get_list("set-cookie")
+    assert len(cookies) == 2
+    assert "session=abc" in cookies[0]
+    assert "preferences=dark" in cookies[1]
+
+
+def test_http_client_handles_gzip_encoded_response():
+    """Regression: a gzip response (e.g. example.com) must not be decoded twice.
+
+    aiter_bytes() yields already-decompressed bytes. Re-attaching the original
+    Content-Encoding header made httpx try to gunzip plain HTML, raising
+    httpx.DecodingError and surfacing as "An unexpected error occurred during the scan."
+    """
+    import asyncio
+
+    client = SecureHTTPClient()
+    url = "https://example.com"
+
+    async def mock_aiter():
+        yield b"<html>already decoded</html>"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = httpx.Headers([
+        ("Content-Encoding", "gzip"),
+        ("Transfer-Encoding", "chunked"),
+        ("Strict-Transport-Security", "max-age=31536000"),
+        ("Set-Cookie", "a=1; Secure"),
+        ("Set-Cookie", "b=2; HttpOnly"),
+    ])
+    mock_resp.request = httpx.Request("GET", url)
+    mock_resp.aiter_bytes = mock_aiter
+
+    with patch(
+        "app.core.http_client.validate_target",
+        return_value=("https", "93.184.216.34"),
+    ), patch("httpx.AsyncClient.stream") as mock_stream_method:
+        mock_stream_method.return_value.__aenter__.return_value = mock_resp
+
+        response = asyncio.run(client.request("GET", url))
+
+    assert response.content == b"<html>already decoded</html>"
+    assert "content-encoding" not in response.headers
+    assert response.headers["Strict-Transport-Security"] == "max-age=31536000"
+    assert len(response.headers.get_list("set-cookie")) == 2

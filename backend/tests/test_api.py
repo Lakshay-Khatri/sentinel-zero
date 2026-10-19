@@ -48,29 +48,53 @@ def test_scan_endpoint_invalid_target():
     assert response.status_code == 400
     assert "Target resolved to a non-public IP" in response.json()["detail"]
 
+
 def test_rate_limiting():
-    """Verify that exceeding the rate limit returns 429 and is per-IP."""
+    """Verify rate limiting is enforced separately for each client IP."""
+    from starlette.testclient import TestClient as StarletteTestClient
+
     request_history.clear()
 
-    # Setup: we need to mock the request.client.host for different "IPs"
-    # TestClient usually has a fixed client. We can use a mock or a customized request.
-    # Since we are using TestClient, we can't easily change request.client.host
-    # without patching the request object in the dependency.
+    # Give each test client a different simulated IP address.
+    client_one = StarletteTestClient(
+        app,
+        client=("1.1.1.1", 12345),
+    )
+    client_two = StarletteTestClient(
+        app,
+        client=("2.2.2.2", 12345),
+    )
 
-    with patch('fastapi.Request.client') as mock_client:
-        # Client 1: hits limit
-        mock_client.host = "1.1.1.1"
-        for i in range(10):
-            client.get("/scan?url=https://example.com")
+    # Mock the scan so this test tests rate limiting, not DNS/network access.
+    async def fake_execute_scan(url):
+        return {
+            "target_url": url,
+            "validated_ip": "93.184.216.34",
+            "findings": [],
+            "scan_metadata": {"status": "completed"},
+        }
 
-        response = client.get("/scan?url=https://example.com")
-        assert response.status_code == 429
+    try:
+        with patch(
+            "app.main._execute_scan",
+            side_effect=fake_execute_scan,
+        ):
+            # The first IP is allowed 10 requests.
+            for _ in range(10):
+                response = client_one.get("/scan?url=https://example.com")
+                assert response.status_code == 200
 
-        # Client 2: should still be allowed
-        mock_client.host = "2.2.2.2"
-        response = client.get("/scan?url=https://example.com")
-        assert response.status_code == 200
+            # The 11th request from the same IP must be rejected.
+            response = client_one.get("/scan?url=https://example.com")
+            assert response.status_code == 429
 
+            # A different IP should still be allowed.
+            response = client_two.get("/scan?url=https://example.com")
+            assert response.status_code == 200
+    finally:
+        request_history.clear()
+        client_one.close()
+        client_two.close()
 def test_concurrency_limit_fail_fast():
     """Verify that exceeding concurrency limit returns 503 immediately."""
     from app.main import scan_semaphore
