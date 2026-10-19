@@ -347,6 +347,91 @@ def test_cookie_analyzer_case_insensitivity():
     findings = analyze_cookies(mock_resp)
     assert len(findings) == 0
 
+def _cookie_findings(*set_cookie_headers):
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.headers = httpx.Headers([("Set-Cookie", h) for h in set_cookie_headers])
+    return analyze_cookies(mock_resp)
+
+
+def test_cookie_evidence_never_contains_value():
+    findings = _cookie_findings("session=SUPER_SECRET_TOKEN_123; Path=/")
+    assert findings
+    for f in findings:
+        assert "SUPER_SECRET_TOKEN_123" not in f.evidence
+        assert "'session'" in f.evidence
+        assert "path=/" in f.evidence
+
+
+def test_cookies_analyzed_from_raw_headers_even_if_jar_rejects_them():
+    """A real httpx.Response drops cookies whose Domain doesn't match; we must not."""
+    resp = httpx.Response(
+        200,
+        headers=[("Set-Cookie", "sid=abc; Domain=other-site.example; Path=/")],
+        request=httpx.Request("GET", "https://example.com"),
+    )
+    assert len(resp.cookies) == 0  # the jar rejected it...
+    ids = [f.id for f in analyze_cookies(resp)]
+    assert "COOKIE_MISSING_HTTPONLY" in ids  # ...but the analyzer still sees it
+
+
+def test_multiple_cookies_analyzed_independently():
+    findings = _cookie_findings(
+        "session=a; Secure; HttpOnly; SameSite=Lax",
+        "theme=dark; Path=/",
+    )
+    assert findings
+    assert all("'theme'" in f.evidence for f in findings)
+
+
+def test_cookie_severity_depends_on_name_sensitivity():
+    sens = {f.id: f.severity for f in _cookie_findings("auth_token=x")}
+    plain = {f.id: f.severity for f in _cookie_findings("theme=dark")}
+    assert sens["COOKIE_MISSING_HTTPONLY"] == Severity.MEDIUM
+    assert sens["COOKIE_MISSING_SECURE"] == Severity.MEDIUM
+    assert sens["COOKIE_MISSING_SAMESITE"] == Severity.LOW
+    assert plain["COOKIE_MISSING_HTTPONLY"] == Severity.LOW
+    assert plain["COOKIE_MISSING_SECURE"] == Severity.LOW
+    assert plain["COOKIE_MISSING_SAMESITE"] == Severity.INFO
+
+
+def test_samesite_in_cookie_value_is_not_an_attribute():
+    ids = [f.id for f in _cookie_findings("pref=samesite_lax; Secure; HttpOnly")]
+    assert "COOKIE_MISSING_SAMESITE" in ids
+
+
+def test_samesite_none_without_secure_and_invalid_values():
+    ids = [f.id for f in _cookie_findings("sid=x; HttpOnly; SameSite=None")]
+    assert "COOKIE_SAMESITE_NONE_INSECURE" in ids
+    ids = [f.id for f in _cookie_findings("sid=x; HttpOnly; Secure; SameSite=None")]
+    assert ids == []
+    ids = [f.id for f in _cookie_findings("sid=x; HttpOnly; Secure; SameSite=Bogus")]
+    assert ids == ["COOKIE_SAMESITE_INVALID"]
+
+
+def test_deletion_cookies_are_ignored():
+    assert _cookie_findings("session=; Max-Age=0") == []
+    assert _cookie_findings("session=; Expires=Thu, 01 Jan 1970 00:00:00 GMT") == []
+    assert _cookie_findings("session=; expires=Thu, 01-Jan-1970 00:00:00 GMT; path=/") == []
+    # A future expiry is a normal cookie and is still checked
+    assert _cookie_findings("session=x; Expires=Fri, 01 Jan 2100 00:00:00 GMT")
+
+
+def test_cookie_prefix_rules():
+    ok = "__Host-sid=x; Secure; HttpOnly; SameSite=Lax; Path=/"
+    assert _cookie_findings(ok) == []
+    ids = [f.id for f in _cookie_findings("__Host-sid=x; Secure; HttpOnly; SameSite=Lax; Path=/; Domain=example.com")]
+    assert "COOKIE_PREFIX_INVALID" in ids
+    ids = [f.id for f in _cookie_findings("__Secure-sid=x; HttpOnly; SameSite=Lax")]
+    assert "COOKIE_PREFIX_INVALID" in ids
+
+
+def test_malformed_and_empty_cookies_do_not_crash():
+    assert _cookie_findings("") == []
+    findings = _cookie_findings("novalue; HttpOnly")
+    assert all("(unnamed)" in f.evidence for f in findings)
+    _cookie_findings(";;;", "=x", "a=b; Max-Age=notanumber", "a=b; Expires=garbage")
+
+
 def test_ssl_analyzer_http_detection():
     """Verify that analyzer flags plain HTTP."""
     mock_resp = MagicMock(spec=httpx.Response)
