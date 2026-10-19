@@ -9,15 +9,24 @@
   --color-muted-tan: #A9845B;
   --color-pale-sage: #DDE9DF;
   --color-main-text: #242923;
-  --color-secondary-text: #73766F;
+  /* 5.9:1 contrast on warm ivory (WCAG AA needs 4.5:1). */
+  --color-secondary-text: #5F625B;
   --color-subtle-border: #E6E2D9;
 
-  /* Severity Colors */
+  /* Offline indicator in the navbar */
   --color-critical: #b91c1c;
-  --color-high: #dc2626;
-  --color-medium: #d97706;
-  --color-low: #6b7280;
-  --color-info: #9ca3af;
+
+  /* Severity badges: dark text on a light tint, all at least 6:1 contrast. */
+  --color-sev-critical-fg: #7f1d1d;
+  --color-sev-critical-bg: #fee2e2;
+  --color-sev-high-fg: #9a3412;
+  --color-sev-high-bg: #ffedd5;
+  --color-sev-medium-fg: #854d0e;
+  --color-sev-medium-bg: #fef3c7;
+  --color-sev-low-fg: #1e40af;
+  --color-sev-low-bg: #dbeafe;
+  --color-sev-info-fg: #374151;
+  --color-sev-info-bg: #f3f4f6;
 }
 
 :root {
