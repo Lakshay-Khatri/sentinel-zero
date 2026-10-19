@@ -1,5 +1,13 @@
-fastapi
-uvicorn
-pydantic
-httpx
-pytest
+# Versions verified with the test suite (Python 3.14).
+fastapi>=0.143.3,<0.144
+uvicorn>=0.54.0,<0.55
+pydantic>=2.14.1,<3
+
+# Security-critical: app/core/safe_transport.py hooks into httpx/httpcore
+# connection internals. Upgrade these deliberately and re-run tests/test_ssrf.py.
+httpx>=0.28.1,<0.29
+httpcore>=1.0.9,<1.1
+anyio>=4.15.1,<5
+
+# Testing
+pytest>=9.1.1,<10

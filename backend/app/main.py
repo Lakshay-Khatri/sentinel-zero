@@ -9,19 +9,29 @@ from app.analyzers.header_check import analyze_headers
 from app.analyzers.cookie_check import analyze_cookies
 from app.schemas.report import AnalysisReport, Finding
 from typing import Dict
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sentinel Zero API")
 
 # Configuration
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+    if origin.strip()
+]
 MAX_CONCURRENT_SCANS = int(os.getenv("MAX_CONCURRENT_SCANS", "3"))
 SCAN_TIMEOUT = float(os.getenv("SCAN_TIMEOUT", "15.0"))
+MAX_URL_LENGTH = 2048
 
 # Simple In-Memory Rate Limiter (Per-Process)
 # In a production environment, this would be replaced by Redis
 RATE_LIMIT_WINDOW = 60  # seconds
 RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "10"))
+# Above this many tracked clients, expired entries are swept so memory stays bounded.
+RATE_LIMIT_SWEEP_THRESHOLD = 10_000
 request_history: Dict[str, list] = {}
 
 # Semaphore for concurrency control
@@ -31,8 +41,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # The API is read-only: browsers only ever need simple GET requests.
+    allow_methods=["GET"],
 )
 
 secure_client = SecureHTTPClient()
@@ -47,11 +57,16 @@ async def rate_limiter(request: Request):
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
 
-    if client_ip not in request_history:
-        request_history[client_ip] = []
+    # Forget clients whose requests have all expired, so the dict cannot grow forever.
+    if len(request_history) > RATE_LIMIT_SWEEP_THRESHOLD:
+        for ip in [ip for ip, times in request_history.items()
+                   if not times or now - times[-1] >= RATE_LIMIT_WINDOW]:
+            del request_history[ip]
 
     # Remove requests older than the window
-    request_history[client_ip] = [t for t in request_history[client_ip] if now - t < RATE_LIMIT_WINDOW]
+    request_history[client_ip] = [
+        t for t in request_history.get(client_ip, []) if now - t < RATE_LIMIT_WINDOW
+    ]
 
     if len(request_history[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
         raise HTTPException(
@@ -66,6 +81,9 @@ async def run_scan(url: str, _ = Depends(rate_limiter)):
     """
     Performs a passive security scan of the provided URL.
     """
+    if len(url) > MAX_URL_LENGTH:
+        raise HTTPException(status_code=400, detail=f"URL is too long (maximum {MAX_URL_LENGTH} characters).")
+
     # Fail-fast concurrency limit: reject immediately if no slots are available.
     if scan_semaphore.locked():
         raise HTTPException(
@@ -90,7 +108,9 @@ async def _execute_scan(url: str):
     """Internal logic for executing the scan."""
     try:
         # 1. Validate Target
-        _, validated_ip = validate_target(url)
+        # validate_target does blocking DNS; run it in a worker thread so one
+        # slow lookup cannot freeze the server for every other user.
+        _, validated_ip = await asyncio.to_thread(validate_target, url)
 
         # 2. Execute Request
         try:
@@ -125,9 +145,9 @@ async def _execute_scan(url: str):
 
     except SecurityValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        # Full traceback goes to the server log only; the client gets a generic message.
+        logger.exception("Unexpected error while executing scan")
         raise HTTPException(status_code=500, detail="An internal server error occurred.")
 
 @app.get("/health")

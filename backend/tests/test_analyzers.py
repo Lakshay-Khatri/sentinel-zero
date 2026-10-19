@@ -51,28 +51,55 @@ def test_http_client_blocks_redirects():
         response = asyncio.run(client.request("GET", url))
         assert response.status_code == 302
 
-def test_http_client_oversized_response():
-    """Verify that responses exceeding max_body_size are rejected during streaming."""
-    client = SecureHTTPClient(max_body_size=10)
-    url = "https://example.com"
+class _RawStream(httpx.AsyncByteStream):
+    """Serves raw bytes in network-sized chunks without httpx pre-reading/decoding them."""
 
-    with patch('app.core.validator.validate_target') as mock_val, \
-         patch('httpx.AsyncClient.stream') as mock_stream:
+    def __init__(self, data: bytes, chunk_size: int = 65536):
+        self.data, self.chunk_size = data, chunk_size
 
-        mock_val.return_value = ("https", "1.2.3.4")
-        mock_resp = MagicMock()
-        async def mock_aiter():
-            yield b"this is a very long response"
+    async def __aiter__(self):
+        for i in range(0, len(self.data), self.chunk_size):
+            yield self.data[i:i + self.chunk_size]
 
-        mock_resp.aiter_bytes = mock_aiter
-        mock_resp.headers = {}
-        mock_resp.status_code = 200
-        mock_resp.request = MagicMock()
-        mock_stream.return_value.__aenter__.return_value = mock_resp
 
-        import asyncio
-        with pytest.raises(SecurityValidationError, match="Response body too large"):
-            asyncio.run(client.request("GET", url))
+def _raw_response(status, headers, data):
+    return httpx.Response(status, headers=headers, stream=_RawStream(data))
+
+
+def _request_via_mock_server(handler):
+    """Run SecureHTTPClient against an in-process fake server (httpx.MockTransport)."""
+    import asyncio
+    with patch("app.core.http_client.validate_target", return_value=("https", "93.184.216.34")), \
+         patch("app.core.http_client.build_public_only_transport",
+               return_value=httpx.MockTransport(handler)):
+        return asyncio.run(SecureHTTPClient().request("GET", "https://site.test/"))
+
+
+def test_http_client_never_downloads_or_decompresses_the_body():
+    """A 'gzip bomb' (small download, huge when decompressed) must not be expanded."""
+    import gzip, tracemalloc
+    bomb = gzip.compress(b"\0" * 200_000_000, compresslevel=9)  # ~190 KB -> 200 MB
+
+    tracemalloc.start()
+    response = _request_via_mock_server(lambda req: _raw_response(
+        200, {"Content-Encoding": "gzip", "X-Frame-Options": "DENY"}, bomb))
+    peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
+    tracemalloc.stop()
+
+    assert response.content == b""
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert peak_mb < 50, f"body was decompressed (peak {peak_mb:.0f} MB)"
+
+
+def test_http_client_tolerates_malformed_content_length_and_corrupt_bodies():
+    """Odd bodies or Content-Length values must not turn into 'unexpected error'."""
+    for headers, content in [
+        ({"Content-Length": "abc"}, b"hi"),
+        ({"Content-Encoding": "gzip"}, b"definitely not gzip"),
+        ({"Content-Encoding": "unknown-codec"}, b"x"),
+    ]:
+        response = _request_via_mock_server(lambda req: _raw_response(200, headers, content))
+        assert response.status_code == 200
 
 # --- HEADER ANALYZER TESTS ---
 
@@ -617,7 +644,7 @@ def test_http_client_handles_gzip_encoded_response():
 
         response = asyncio.run(client.request("GET", url))
 
-    assert response.content == b"<html>already decoded</html>"
+    assert response.content == b""  # body is intentionally not downloaded
     assert "content-encoding" not in response.headers
     assert response.headers["Strict-Transport-Security"] == "max-age=31536000"
     assert len(response.headers.get_list("set-cookie")) == 2

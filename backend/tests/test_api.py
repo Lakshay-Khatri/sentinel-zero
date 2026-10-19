@@ -141,3 +141,58 @@ def test_concurrency_limit_fail_fast():
 
     # Restore semaphore for other tests
     scan_semaphore._value = 3
+
+
+def test_overlong_url_is_rejected():
+    request_history.clear()
+    response = client.get("/scan", params={"url": "https://example.com/" + "a" * 3000})
+    assert response.status_code == 400
+    assert "too long" in response.json()["detail"]
+
+
+def test_cors_allows_only_get_from_configured_origin():
+    allowed = client.options("/scan", headers={
+        "Origin": "http://localhost:5173", "Access-Control-Request-Method": "GET"})
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+    post = client.options("/scan", headers={
+        "Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST"})
+    assert post.status_code == 400
+
+    other_origin = client.options("/scan", headers={
+        "Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
+    assert "access-control-allow-origin" not in other_origin.headers
+
+
+def test_rate_limiter_forgets_expired_clients():
+    import app.main as main
+    request_history.clear()
+    # 20 stale clients whose requests are all older than the window
+    for i in range(20):
+        request_history[f"10.0.0.{i}"] = [0.0]
+    async def fake_scan(url):
+        return {}
+
+    with patch.object(main, "RATE_LIMIT_SWEEP_THRESHOLD", 5), \
+         patch("app.main._execute_scan", side_effect=fake_scan):
+        client.get("/scan?url=https://example.com")
+    assert all(not ip.startswith("10.0.0.") for ip in request_history)
+    request_history.clear()
+
+
+def test_unexpected_errors_are_logged_but_not_leaked(caplog):
+    request_history.clear()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("internal detail: /etc/secret-path")
+
+    with patch("app.main.validate_target", return_value=("https", "93.184.216.34")), \
+         patch("app.core.http_client.SecureHTTPClient.request", side_effect=boom), \
+         caplog.at_level("ERROR"):
+        response = client.get("/scan?url=https://example.com")
+
+    assert response.status_code == 500
+    assert "secret-path" not in response.text
+    assert any("Unexpected error" in r.message for r in caplog.records)
+    assert any("secret-path" in (r.exc_text or "") or r.exc_info for r in caplog.records)

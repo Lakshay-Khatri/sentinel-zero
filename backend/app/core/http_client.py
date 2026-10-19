@@ -1,11 +1,15 @@
+import asyncio
+import logging
 import httpx
 import ssl
 from typing import Optional
 from app.core.validator import validate_target, SecurityValidationError
 from app.core.safe_transport import build_public_only_transport
 
-# Headers describing how the body was encoded on the wire. They no longer
-# match once httpx has decoded the body, so they are removed on reconstruction.
+logger = logging.getLogger(__name__)
+
+# Headers describing how the body was encoded on the wire. The body is not
+# kept, so they no longer apply and are removed on reconstruction.
 _TRANSPORT_HEADERS = {"content-encoding", "content-length", "transfer-encoding"}
 
 
@@ -74,12 +78,17 @@ class SecureHTTPClient:
     DNS-rebinding gap between validation and connection. Redirects are not
     followed and proxy environment variables are ignored.
 
+    The response body is never downloaded: the analyzers only need the status
+    line, headers and TLS details. Skipping the body removes the risk of huge
+    or maliciously compressed bodies ("gzip bombs"). A future analyzer that
+    needs page content must add a size limit that counts *raw* (compressed)
+    bytes, not decoded bytes.
+
     Defence in depth: when deployed publicly, also restrict outbound traffic
     at the network level (firewall / egress rules) where the host allows it.
     """
-    def __init__(self, timeout: float = 5.0, max_body_size: int = 1024 * 1024):
+    def __init__(self, timeout: float = 5.0):
         self.timeout = timeout
-        self.max_body_size = max_body_size
 
     async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """
@@ -87,7 +96,8 @@ class SecureHTTPClient:
         """
         # 1. Early validation for clear error messages (scheme, port, DNS).
         # The binding enforcement happens again at connection time (step 3).
-        validate_target(url)
+        # Blocking DNS runs in a worker thread so it cannot stall the event loop.
+        await asyncio.to_thread(validate_target, url)
 
         # 2. Request Configuration
         # Force no redirects to prevent SSRF and unauthorized target hopping.
@@ -102,29 +112,19 @@ class SecureHTTPClient:
                 timeout=self.timeout,
                 trust_env=False,
             ) as client:
-                # We use a stream to enforce body size limits strictly.
+                # stream() returns as soon as the headers arrive. Leaving the
+                # block without reading closes the connection, so the body is
+                # never downloaded or decompressed.
                 async with client.stream(method, url, **kwargs) as response:
-                    # We read the headers first.
-                    content_length = response.headers.get("Content-Length")
-                    if content_length and int(content_length) > self.max_body_size:
-                        raise SecurityValidationError("Response body too large (Content-Length).")
-
-                    # Read the body in chunks to enforce the size limit.
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > self.max_body_size:
-                            raise SecurityValidationError("Response body too large (streamed).")
-
-                    # We reconstruct a response object for the analyzers to use.
-                    # aiter_bytes() has already decompressed the body, so we must drop
-                    # the transport headers that describe the *original* encoded body.
-                    # Otherwise httpx tries to gunzip plain bytes again (DecodingError).
-                    # Every other header (security headers, repeated Set-Cookie) is kept.
+                    # We build a header-only response for the analyzers.
+                    # The transport headers describe a body we did not keep, so they
+                    # are dropped; httpx would otherwise try to decode an empty body as
+                    # gzip etc. Every other header (security headers, repeated
+                    # Set-Cookie) is kept.
                     return httpx.Response(
                         status_code=response.status_code,
                         headers=_strip_transport_headers(response.headers),
-                        content=bytes(body),
+                        content=b"",
                         request=response.request,
                         # TLS details for the TLS analyzer (None for plain HTTP),
                         # and the IP address that was really connected to.
@@ -144,8 +144,15 @@ class SecureHTTPClient:
                     cert_error.verify_message or "certificate verification failed"
                 )
             raise SecurityValidationError("A network or TLS error occurred.")
-        except Exception as e:
-            if isinstance(e, SecurityValidationError):
-                raise e
-            # Sanitize internal error messages.
+        except httpx.InvalidURL:
+            raise SecurityValidationError("Malformed URL.")
+        except httpx.HTTPError:
+            raise SecurityValidationError("The target sent a response that could not be processed.")
+        except SecurityValidationError:
+            raise
+        except Exception:
+            # Unknown failure: log the full traceback server-side (never sent to the
+            # client) so bugs are diagnosable instead of hidden, as the original
+            # gzip bug was. The URL is deliberately not logged.
+            logger.exception("Unexpected error during scan request")
             raise SecurityValidationError("An unexpected error occurred during the scan.")
