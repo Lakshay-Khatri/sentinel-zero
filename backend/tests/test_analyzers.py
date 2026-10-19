@@ -113,20 +113,21 @@ def test_header_analyzer_case_insensitivity():
     assert len(findings) == 0
 
 def test_header_analyzer_empty_values():
-    """Verify that empty header values are still treated as 'present' for this basic version."""
+    """Empty headers are reported as EMPTY, distinct from MISSING."""
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.headers = {
         "Content-Security-Policy": "",
         "Strict-Transport-Security": " ",
     }
     findings = analyze_headers(mock_resp)
-    # We now expect HSTS_MALFORMED because " " is not a valid max-age
-    # but CSP is still "present".
-    # Total: 3 missing + 1 malformed = 4
-    assert len(findings) == 4
-    assert any(f.id == "HSTS_MALFORMED" for f in findings)
-    assert not any(f.id == "MISSING_CSP" for f in findings)
-    assert not any(f.id == "MISSING_HSTS" for f in findings)
+    ids = {f.id for f in findings}
+    # 3 missing + 2 empty = 5
+    assert len(findings) == 5
+    assert {"CSP_EMPTY", "HSTS_EMPTY"} <= ids
+    assert not {"MISSING_CSP", "MISSING_HSTS"} & ids
+    csp = next(f for f in findings if f.id == "CSP_EMPTY")
+    assert csp.severity == Severity.MEDIUM
+    assert "empty" in csp.evidence
 
 def test_header_finding_details():
     """Verify that findings have the correct metadata."""
@@ -202,6 +203,119 @@ def test_xfo_validation():
     mock_resp.headers = {"X-Frame-Options": "ALLOW-ALL"}
     findings = analyze_headers(mock_resp)
     assert any(f.id == "XFO_INVALID" for f in findings)
+
+
+def _headers_resp(pairs):
+    """Build a mock response from (name, value) pairs; allows repeated headers."""
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.headers = httpx.Headers(pairs)
+    return mock_resp
+
+
+def _ids(pairs):
+    return [f.id for f in analyze_headers(_headers_resp(pairs))]
+
+
+def test_hsts_edge_cases():
+    # max-age=0 disables HSTS rather than merely weakening it
+    assert "HSTS_DISABLED" in _ids([("Strict-Transport-Security", "max-age=0")])
+    assert "HSTS_WEAK" not in _ids([("Strict-Transport-Security", "max-age=0")])
+    # Quoted max-age is valid per RFC 6797
+    ids = _ids([("Strict-Transport-Security", 'max-age="31536000"; includeSubDomains')])
+    assert not {"HSTS_MALFORMED", "HSTS_WEAK", "HSTS_DISABLED"} & set(ids)
+    # Negative / non-numeric values are malformed
+    assert "HSTS_MALFORMED" in _ids([("Strict-Transport-Security", "max-age=-5")])
+    # Only the first HSTS header is honoured by browsers
+    ids = _ids([("Strict-Transport-Security", "max-age=3600"),
+                ("Strict-Transport-Security", "max-age=31536000")])
+    assert "HSTS_WEAK" in ids
+
+
+def test_header_evidence_shows_observed_value():
+    findings = analyze_headers(_headers_resp([("Strict-Transport-Security", "max-age=3600; preload")]))
+    weak = next(f for f in findings if f.id == "HSTS_WEAK")
+    assert weak.evidence == "Strict-Transport-Security: max-age=3600; preload"
+
+
+def test_long_header_evidence_is_truncated():
+    long_csp = "default-src 'self'; img-src " + " ".join(f"https://cdn{i}.example.com" for i in range(50))
+    findings = analyze_headers(_headers_resp([
+        ("Content-Security-Policy", long_csp + "; script-src 'unsafe-eval'"),
+        ("X-Frame-Options", "x" * 1000),
+    ]))
+    xfo = next(f for f in findings if f.id == "XFO_INVALID")
+    assert xfo.evidence.endswith("(truncated)")
+    assert len(xfo.evidence) < 400
+
+
+def test_csp_findings_are_deduplicated_with_directive_evidence():
+    findings = analyze_headers(_headers_resp([
+        ("Content-Security-Policy", "script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'"),
+    ]))
+    inline = [f for f in findings if f.id == "CSP_UNSAFE_INLINE"]
+    assert len(inline) == 1
+    assert "script-src 'unsafe-inline'" in inline[0].evidence
+    assert "style-src 'unsafe-inline'" in inline[0].evidence
+
+
+def test_csp_unsafe_inline_ignored_when_nonce_or_hash_present():
+    ids = _ids([("Content-Security-Policy", "script-src 'nonce-abc123' 'unsafe-inline'")])
+    assert "CSP_UNSAFE_INLINE" not in ids
+    ids = _ids([("Content-Security-Policy", "script-src 'sha256-xyz=' 'unsafe-inline'")])
+    assert "CSP_UNSAFE_INLINE" not in ids
+
+
+def test_csp_wildcard_in_script_src_and_no_false_positive_on_img_src():
+    assert "CSP_WILDCARD" in _ids([("Content-Security-Policy", "script-src *")])
+    assert "CSP_WILDCARD" not in _ids([("Content-Security-Policy", "default-src 'self'; img-src *")])
+
+
+def test_csp_unsafe_eval_not_matched_by_substring_hostname():
+    # A host merely containing the text is not the 'unsafe-eval' keyword
+    ids = _ids([("Content-Security-Policy", "script-src https://unsafe-eval.example.com")])
+    assert "CSP_UNSAFE_EVAL" not in ids
+
+
+def test_multiple_csp_headers_are_parsed_separately():
+    # httpx would join these with ", " which breaks directive parsing
+    ids = _ids([("Content-Security-Policy", "default-src 'self'"),
+                ("Content-Security-Policy", "script-src 'unsafe-eval'")])
+    assert "CSP_UNSAFE_EVAL" in ids
+
+
+def test_frame_ancestors_replaces_missing_xfo():
+    ids = _ids([("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")])
+    assert "MISSING_XFO" not in ids
+    # Without frame-ancestors, missing XFO is still reported
+    assert "MISSING_XFO" in _ids([("Content-Security-Policy", "default-src 'self'")])
+
+
+def test_xfo_duplicate_headers():
+    assert "XFO_INVALID" not in _ids([("X-Frame-Options", "DENY"), ("X-Frame-Options", "deny")])
+    assert "XFO_INVALID" in _ids([("X-Frame-Options", "DENY"), ("X-Frame-Options", "SAMEORIGIN")])
+    assert "XFO_INVALID" in _ids([("X-Frame-Options", "ALLOW-FROM https://a.example")])
+
+
+def test_xcto_validation():
+    assert "XCTO_INVALID" not in _ids([("X-Content-Type-Options", "NoSniff")])
+    assert "XCTO_INVALID" in _ids([("X-Content-Type-Options", "yes")])
+
+
+def test_referrer_policy_validation():
+    assert "RP_UNSAFE_URL" in _ids([("Referrer-Policy", "unsafe-url")])
+    assert "RP_INVALID" in _ids([("Referrer-Policy", "bogus-value")])
+    # Comma list: the last recognised token wins (unknown tokens are skipped)
+    ids = _ids([("Referrer-Policy", "unsafe-url, strict-origin-when-cross-origin, future-token")])
+    assert not {"RP_UNSAFE_URL", "RP_INVALID"} & set(ids)
+    assert not {"RP_UNSAFE_URL", "RP_INVALID", "MISSING_RP"} & set(_ids([("Referrer-Policy", "no-referrer")]))
+
+
+def test_header_finding_ids_are_unique_per_scan():
+    findings = analyze_headers(_headers_resp([
+        ("Content-Security-Policy", "default-src *; script-src * 'unsafe-eval' 'unsafe-inline'; style-src 'unsafe-inline' 'unsafe-eval'"),
+    ]))
+    ids = [f.id for f in findings]
+    assert len(ids) == len(set(ids))
 
 def test_cookie_analyzer_missing_attributes():
     """Verify that cookies missing Secure/HttpOnly/SameSite are detected."""
