@@ -104,18 +104,32 @@ def test_hostname_resolving_to_loopback_is_blocked_at_connection_time():
 
 
 def test_proxy_environment_variables_are_ignored(monkeypatch):
-    """An HTTP_PROXY setting must not route scans through another host."""
+    """
+    An HTTP_PROXY setting must not route scans through another host.
+
+    Two layers give this guarantee: httpx ignores proxy environment variables
+    when a custom transport is passed, and the client also sets trust_env=False.
+    This test failed against the original client, which used neither.
+    """
     with _InternalService() as proxy, _allow_port(proxy.port):
         monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.port}")
         monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{proxy.port}")
         fake, _ = _rebinding_dns("public.test", [PUBLIC_IP])
-        # The connection to the public IP will fail (no network in tests) - that's fine.
-        # What matters is that nothing was sent to the "proxy" on loopback.
-        with patch("socket.getaddrinfo", side_effect=fake):
+        attempted = []
+
+        async def no_real_network(self, host, port, **kwargs):
+            # Record where the client tried to connect, without touching the network.
+            attempted.append((host, port))
+            raise httpcore.ConnectError("network disabled in tests")
+
+        with patch("socket.getaddrinfo", side_effect=fake), \
+             patch.object(httpcore.AnyIOBackend, "connect_tcp", no_real_network):
             with pytest.raises(SecurityValidationError):
                 asyncio.run(SecureHTTPClient(timeout=1.0).request("GET", "http://public.test/"))
 
     assert proxy.hits == []
+    # The client went straight to the validated target, not to the proxy.
+    assert attempted == [(PUBLIC_IP, 80)]
 
 
 # --- Address classification -------------------------------------------------
@@ -220,3 +234,30 @@ def test_backend_dns_failure_is_a_controlled_error():
     with patch("socket.getaddrinfo", side_effect=socket.gaierror("no such host")):
         with pytest.raises(SecurityValidationError, match="Could not resolve"):
             asyncio.run(backend.connect_tcp("does-not-exist.test", 443))
+
+
+def test_connect_timeout_is_shared_across_all_resolved_ips():
+    """Several unreachable IPs must not multiply the timeout (found in live testing)."""
+    import time
+    backend = PublicOnlyBackend()
+    ips = ["93.184.216.34", "93.184.216.35", "93.184.216.36", "93.184.216.37"]
+
+    def many(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips]
+
+    budgets = []
+
+    async def slow_connect(host, port, timeout=None, **kwargs):
+        budgets.append(timeout)
+        await asyncio.sleep(timeout)  # behaves like an unreachable host
+        raise httpcore.ConnectTimeout("timed out")
+
+    start = time.monotonic()
+    with patch("socket.getaddrinfo", side_effect=many),          patch.object(backend._inner, "connect_tcp", side_effect=slow_connect):
+        with pytest.raises(httpcore.ConnectTimeout):
+            asyncio.run(backend.connect_tcp("multi.test", 443, timeout=0.4))
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.8, f"took {elapsed:.2f}s; the 0.4s budget was multiplied"
+    assert budgets[0] <= 0.4
+

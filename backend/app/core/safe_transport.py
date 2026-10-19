@@ -22,6 +22,7 @@ TLS is unaffected: httpcore still sends the original hostname as SNI and
 verifies the certificate against it, even though the socket targets an IP.
 """
 import socket
+import time
 from typing import Iterable, Optional
 
 import anyio
@@ -48,8 +49,15 @@ class PublicOnlyBackend(httpcore.AsyncNetworkBackend):
     ) -> httpcore.AsyncNetworkStream:
         validator.check_port_allowed(port)
 
+        # One shared time budget for DNS plus every connection attempt, so a host
+        # with several unreachable IPs cannot multiply the connect timeout.
+        deadline = None if timeout is None else time.monotonic() + timeout
+
+        def remaining() -> Optional[float]:
+            return None if deadline is None else max(0.0, deadline - time.monotonic())
+
         try:
-            with anyio.fail_after(timeout):
+            with anyio.fail_after(remaining()):
                 infos = await anyio.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except TimeoutError:
             raise httpcore.ConnectTimeout("DNS resolution timed out")
@@ -59,11 +67,14 @@ class PublicOnlyBackend(httpcore.AsyncNetworkBackend):
         ips = check_resolved_ips(host, (info[4][0] for info in infos))
 
         # Connect to the addresses we just validated, in resolver order.
-        last_error: Optional[Exception] = None
+        last_error: Exception = httpcore.ConnectTimeout("Connection timed out")
         for ip in ips:
+            budget = remaining()
+            if budget == 0.0:
+                break
             try:
                 return await self._inner.connect_tcp(
-                    ip, port, timeout=timeout,
+                    ip, port, timeout=budget,
                     local_address=local_address, socket_options=socket_options,
                 )
             except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:

@@ -31,18 +31,13 @@ def test_http_client_blocks_redirects():
     client = SecureHTTPClient()
     url = "https://example.com"
 
-    with patch('app.core.validator.validate_target') as mock_val, \
+    # Patch the name http_client actually uses, so no real DNS lookup happens.
+    with patch('app.core.http_client.validate_target') as mock_val, \
          patch('httpx.AsyncClient.stream') as mock_stream:
 
         mock_val.return_value = ("https", "1.2.3.4")
         mock_resp = MagicMock()
-
-        # Correctly mock an async generator for aiter_bytes
-        async def mock_aiter():
-            yield b"test"
-
-        mock_resp.aiter_bytes = mock_aiter
-        mock_resp.headers = {}
+        mock_resp.headers = {"Location": "https://elsewhere.example/"}
         mock_resp.status_code = 302
         mock_resp.request = MagicMock()
         mock_stream.return_value.__aenter__.return_value = mock_resp
@@ -50,6 +45,10 @@ def test_http_client_blocks_redirects():
         import asyncio
         response = asyncio.run(client.request("GET", url))
         assert response.status_code == 302
+        assert response.headers["Location"] == "https://elsewhere.example/"
+        # The redirect is returned to the analyzers, never followed.
+        assert mock_stream.call_count == 1
+        assert mock_stream.call_args.kwargs["follow_redirects"] is False
 
 class _RawStream(httpx.AsyncByteStream):
     """Serves raw bytes in network-sized chunks without httpx pre-reading/decoding them."""
