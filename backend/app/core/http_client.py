@@ -2,6 +2,7 @@ import httpx
 import ssl
 from typing import Optional
 from app.core.validator import validate_target, SecurityValidationError
+from app.core.safe_transport import build_public_only_transport
 
 # Headers describing how the body was encoded on the wire. They no longer
 # match once httpx has decoded the body, so they are removed on reconstruction.
@@ -52,13 +53,29 @@ def _read_tls_info(response: httpx.Response) -> Optional[dict]:
         "certificate": ssl_object.getpeercert(),
     }
 
+def _read_connected_ip(response: httpx.Response) -> Optional[str]:
+    """The IP address the socket is actually connected to."""
+    network_stream = response.extensions.get("network_stream")
+    if network_stream is None:
+        return None
+    server_addr = network_stream.get_extra_info("server_addr")
+    if isinstance(server_addr, tuple) and server_addr and isinstance(server_addr[0], str):
+        return server_addr[0]
+    return None
+
+
 class SecureHTTPClient:
     """
     A hardened HTTP client for passive security scanning.
 
-    SECURITY WARNING: This client uses hostname-based requests after validation.
-    It does NOT prevent DNS-rebinding attacks. For production-grade protection,
-    an egress proxy or network-level IP pinning is required.
+    Every outbound TCP connection goes through PublicOnlyBackend
+    (app.core.safe_transport), which resolves the hostname once, rejects
+    non-public addresses and connects to the checked IP. This closes the
+    DNS-rebinding gap between validation and connection. Redirects are not
+    followed and proxy environment variables are ignored.
+
+    Defence in depth: when deployed publicly, also restrict outbound traffic
+    at the network level (firewall / egress rules) where the host allows it.
     """
     def __init__(self, timeout: float = 5.0, max_body_size: int = 1024 * 1024):
         self.timeout = timeout
@@ -68,20 +85,23 @@ class SecureHTTPClient:
         """
         Performs a secure passive request.
         """
-        # 1. Mandatory Backend Validation
-        # Ensures the target currently resolves to a public IP.
+        # 1. Early validation for clear error messages (scheme, port, DNS).
+        # The binding enforcement happens again at connection time (step 3).
         validate_target(url)
 
         # 2. Request Configuration
         # Force no redirects to prevent SSRF and unauthorized target hopping.
         kwargs["follow_redirects"] = False
 
-        # TLS verification is ENABLED by default in httpx.
-        # AsyncClient.stream() does not accept 'verify' as a keyword argument;
-        # verification is configured on the client instance itself.
-
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, verify=True) as client:
+            # 3. TLS verification stays enabled inside the transport.
+            # trust_env=False: ignore HTTP(S)_PROXY and similar environment settings,
+            # which could otherwise route scans through another host.
+            async with httpx.AsyncClient(
+                transport=build_public_only_transport(),
+                timeout=self.timeout,
+                trust_env=False,
+            ) as client:
                 # We use a stream to enforce body size limits strictly.
                 async with client.stream(method, url, **kwargs) as response:
                     # We read the headers first.
@@ -106,8 +126,12 @@ class SecureHTTPClient:
                         headers=_strip_transport_headers(response.headers),
                         content=bytes(body),
                         request=response.request,
-                        # TLS details for the TLS analyzer (None for plain HTTP).
-                        extensions={"tls_info": _read_tls_info(response)},
+                        # TLS details for the TLS analyzer (None for plain HTTP),
+                        # and the IP address that was really connected to.
+                        extensions={
+                            "tls_info": _read_tls_info(response),
+                            "connected_ip": _read_connected_ip(response),
+                        },
                     )
 
         except httpx.TimeoutException:

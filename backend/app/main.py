@@ -117,7 +117,8 @@ async def _execute_scan(url: str):
 
         return AnalysisReport(
             target_url=url,
-            validated_ip=validated_ip,
+            # Prefer the address actually connected to (validated at connection time).
+            validated_ip=response.extensions.get("connected_ip") or validated_ip,
             findings=all_findings,
             scan_metadata={"status": "completed", **tls_metadata(response)}
         )
