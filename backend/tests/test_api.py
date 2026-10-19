@@ -19,19 +19,26 @@ def test_scan_endpoint_valid_target():
     # Clear rate limit history for this test
     request_history.clear()
 
-    with patch('app.core.validator.validate_target') as mock_val, \
+    with patch('app.main.validate_target') as mock_val, \
          patch('app.core.http_client.SecureHTTPClient.request') as mock_req:
 
-        mock_val.return_value = ("https", "1.2.3.4")
+        mock_val.return_value = ("https", "93.184.216.34")
 
-        # Use httpx.Headers instead of a dict to support get_list()
-        mock_headers = httpx.Headers({"Content-Type": "text/html"})
-
-        # Use AsyncMock for the async request method
-        mock_resp = MagicMock(spec=httpx.Response)
-        mock_resp.status_code = 200
-        mock_resp.headers = mock_headers
-        mock_resp.request.url.host = "example.com"
+        # A real httpx.Response, shaped like what SecureHTTPClient returns.
+        mock_resp = httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            request=httpx.Request("GET", "https://example.com"),
+            extensions={"tls_info": {
+                "version": "TLSv1.3",
+                "cipher": "TLS_AES_256_GCM_SHA384",
+                "certificate": {
+                    "subject": ((("commonName", "example.com"),),),
+                    "issuer": ((("organizationName", "Example CA"),),),
+                    "notAfter": "Dec 31 23:59:59 2099 GMT",
+                },
+            }},
+        )
 
         async def mocked_request(*args, **kwargs):
             return mock_resp
@@ -40,7 +47,33 @@ def test_scan_endpoint_valid_target():
 
         response = client.get("/scan?url=https://example.com")
         assert response.status_code == 200
-        assert "target_url" in response.json()
+        body = response.json()
+        assert body["target_url"] == "https://example.com"
+        assert body["validated_ip"] == "93.184.216.34"
+        meta = body["scan_metadata"]
+        assert meta["tls_version"] == "TLSv1.3"
+        assert meta["cert_issuer"] == "Example CA"
+        assert meta["cert_subject"] == "example.com"
+
+
+def test_scan_endpoint_reports_certificate_failure():
+    """An invalid certificate produces a report with a finding, not an error."""
+    from app.core.http_client import CertificateVerificationError
+    request_history.clear()
+
+    async def failing_request(*args, **kwargs):
+        raise CertificateVerificationError("certificate has expired")
+
+    with patch('app.main.validate_target', return_value=("https", "93.184.216.34")), \
+         patch('app.core.http_client.SecureHTTPClient.request', side_effect=failing_request):
+        response = client.get("/scan?url=https://expired.example")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [f["id"] for f in body["findings"]] == ["CERT_VERIFICATION_FAILED"]
+    assert body["findings"][0]["severity"] == "high"
+    assert "certificate has expired" in body["findings"][0]["evidence"]
+    assert "skipped" in body["scan_metadata"]["note"]
 
 def test_scan_endpoint_invalid_target():
     """Verify that an invalid target (e.g. localhost) is rejected."""

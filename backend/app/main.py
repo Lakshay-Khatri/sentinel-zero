@@ -3,8 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import asyncio
 from app.core.validator import validate_target, SecurityValidationError
-from app.core.http_client import SecureHTTPClient
-from app.analyzers.ssl_check import analyze_ssl
+from app.core.http_client import SecureHTTPClient, CertificateVerificationError
+from app.analyzers.ssl_check import analyze_ssl, certificate_failure_finding, tls_metadata
 from app.analyzers.header_check import analyze_headers
 from app.analyzers.cookie_check import analyze_cookies
 from app.schemas.report import AnalysisReport, Finding
@@ -90,10 +90,22 @@ async def _execute_scan(url: str):
     """Internal logic for executing the scan."""
     try:
         # 1. Validate Target
-        validate_target(url)
+        _, validated_ip = validate_target(url)
 
         # 2. Execute Request
-        response = await secure_client.request("GET", url)
+        try:
+            response = await secure_client.request("GET", url)
+        except CertificateVerificationError as e:
+            # No trusted connection was made, so only the certificate result is reported.
+            return AnalysisReport(
+                target_url=url,
+                validated_ip=validated_ip,
+                findings=[certificate_failure_finding(e.verify_message)],
+                scan_metadata={
+                    "status": "completed",
+                    "note": "Header and cookie checks were skipped because the certificate could not be verified.",
+                }
+            )
 
         # 3. Run Analyzers
         ssl_findings = analyze_ssl(url, response)
@@ -101,14 +113,13 @@ async def _execute_scan(url: str):
         cookie_findings = analyze_cookies(response)
 
         # 4. Aggregate Results
-        _, validated_ip = validate_target(url)
         all_findings = ssl_findings + header_findings + cookie_findings
 
         return AnalysisReport(
             target_url=url,
             validated_ip=validated_ip,
             findings=all_findings,
-            scan_metadata={"status": "completed"}
+            scan_metadata={"status": "completed", **tls_metadata(response)}
         )
 
     except SecurityValidationError as e:

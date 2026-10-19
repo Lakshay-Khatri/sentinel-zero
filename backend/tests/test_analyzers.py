@@ -432,12 +432,118 @@ def test_malformed_and_empty_cookies_do_not_crash():
     _cookie_findings(";;;", "=x", "a=b; Max-Age=notanumber", "a=b; Expires=garbage")
 
 
+def _tls_resp(url="https://example.com", status=200, headers=None, tls_info=None):
+    """Real httpx.Response shaped like SecureHTTPClient's output."""
+    return httpx.Response(
+        status,
+        headers=headers or {},
+        request=httpx.Request("GET", url),
+        extensions={"tls_info": tls_info},
+    )
+
+
+def _cert_expiring_in(days):
+    import time, ssl as _ssl
+    not_after = time.strftime("%b %d %H:%M:%S %Y GMT", time.gmtime(time.time() + days * 86400 + 3600))
+    assert _ssl.cert_time_to_seconds(not_after)  # same format OpenSSL uses
+    return {
+        "version": "TLSv1.3",
+        "cipher": "TLS_AES_128_GCM_SHA256",
+        "certificate": {
+            "subject": ((("commonName", "example.com"),),),
+            "issuer": ((("countryName", "US"),), (("organizationName", "Let's Encrypt"),)),
+            "notAfter": not_after,
+        },
+    }
+
+
 def test_ssl_analyzer_http_detection():
     """Verify that analyzer flags plain HTTP."""
-    mock_resp = MagicMock(spec=httpx.Response)
-    findings = analyze_ssl("http://example.com", mock_resp)
+    findings = analyze_ssl("http://example.com", _tls_resp("http://example.com"))
     assert len(findings) == 1
     assert findings[0].id == "NO_HTTPS"
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_ssl_analyzer_scheme_is_case_insensitive():
+    findings = analyze_ssl("HTTP://example.com", _tls_resp("http://example.com"))
+    assert [f.id for f in findings] == ["NO_HTTPS"]
+
+
+def test_ssl_analyzer_http_redirect_to_https():
+    resp = _tls_resp("http://example.com", 301, {"Location": "https://example.com/"})
+    findings = analyze_ssl("http://example.com", resp)
+    assert [f.id for f in findings] == ["HTTP_REDIRECTS_TO_HTTPS"]
+    assert findings[0].severity == Severity.LOW
+    # A redirect to another plain-HTTP URL is still NO_HTTPS
+    resp = _tls_resp("http://example.com", 301, {"Location": "http://www.example.com/"})
+    assert [f.id for f in analyze_ssl("http://example.com", resp)] == ["NO_HTTPS"]
+
+
+def test_ssl_analyzer_makes_no_network_connections():
+    """The analyzer must only use data from the verified client connection."""
+    with patch("socket.create_connection") as conn, patch("socket.getaddrinfo") as dns:
+        analyze_ssl("https://example.com", _tls_resp(tls_info=_cert_expiring_in(200)))
+    conn.assert_not_called()
+    dns.assert_not_called()
+
+
+def test_ssl_analyzer_certificate_expiry_thresholds():
+    def ids_and_sev(days):
+        return [(f.id, f.severity) for f in analyze_ssl("https://example.com", _tls_resp(tls_info=_cert_expiring_in(days)))]
+    assert ids_and_sev(200) == []
+    assert ids_and_sev(25) == [("CERT_EXPIRING_SOON", Severity.LOW)]
+    assert ids_and_sev(5) == [("CERT_EXPIRING_SOON", Severity.MEDIUM)]
+
+
+def test_ssl_analyzer_missing_tls_info_is_reported_honestly():
+    findings = analyze_ssl("https://example.com", _tls_resp(tls_info=None))
+    assert [f.id for f in findings] == ["TLS_DETAILS_UNAVAILABLE"]
+    assert findings[0].severity == Severity.INFO
+
+
+def test_certificate_failure_finding():
+    from app.analyzers.ssl_check import certificate_failure_finding
+    f = certificate_failure_finding("self-signed certificate")
+    assert f.id == "CERT_VERIFICATION_FAILED"
+    assert f.severity == Severity.HIGH
+    assert f.evidence == "Certificate verification failed: self-signed certificate"
+
+
+def test_tls_metadata_extracts_observed_details():
+    from app.analyzers.ssl_check import tls_metadata
+    meta = tls_metadata(_tls_resp(tls_info=_cert_expiring_in(200)))
+    assert meta["tls_version"] == "TLSv1.3"
+    assert meta["cert_subject"] == "example.com"
+    assert meta["cert_issuer"] == "Let's Encrypt"
+    assert 199 <= int(meta["cert_days_remaining"]) <= 200
+    assert all(isinstance(v, str) for v in meta.values())
+    assert tls_metadata(_tls_resp("http://example.com")) == {}
+
+
+def test_http_client_converts_cert_errors_into_certificate_verification_error():
+    """httpx wraps ssl.SSLCertVerificationError; the client must surface its reason."""
+    import asyncio, ssl as _ssl
+    from app.core.http_client import CertificateVerificationError
+
+    cert_err = _ssl.SSLCertVerificationError(1, "verify failed")
+    cert_err.verify_message = "certificate has expired"
+    wrapped = httpx.ConnectError("boom")
+    wrapped.__cause__ = cert_err
+
+    client = SecureHTTPClient()
+    with patch("app.core.http_client.validate_target", return_value=("https", "93.184.216.34")), \
+         patch("httpx.AsyncClient.stream", side_effect=wrapped):
+        with pytest.raises(CertificateVerificationError) as info:
+            asyncio.run(client.request("GET", "https://expired.example"))
+    assert info.value.verify_message == "certificate has expired"
+
+    # Ordinary network errors are still generic SecurityValidationErrors
+    with patch("app.core.http_client.validate_target", return_value=("https", "93.184.216.34")), \
+         patch("httpx.AsyncClient.stream", side_effect=httpx.ConnectError("refused")):
+        with pytest.raises(SecurityValidationError) as info:
+            asyncio.run(client.request("GET", "https://down.example"))
+    assert not isinstance(info.value, CertificateVerificationError)
 def test_http_client_preserves_response_headers_and_multiple_cookies():
     """Verify that the HTTP client preserves security headers and Set-Cookie values."""
     import asyncio

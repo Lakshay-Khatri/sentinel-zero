@@ -14,6 +14,44 @@ def _strip_transport_headers(headers) -> httpx.Headers:
         [(k, v) for k, v in httpx.Headers(headers).multi_items() if k.lower() not in _TRANSPORT_HEADERS]
     )
 
+
+class CertificateVerificationError(Exception):
+    """The server's TLS certificate failed verification (expired, self-signed, wrong host...)."""
+    def __init__(self, verify_message: str):
+        super().__init__(verify_message)
+        # OpenSSL's short reason, e.g. "certificate has expired". Safe to show users.
+        self.verify_message = verify_message
+
+
+def _find_cert_verification_error(exc: BaseException) -> Optional[ssl.SSLCertVerificationError]:
+    """Walk the exception chain (httpx -> httpcore -> ssl) looking for a certificate error."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def _read_tls_info(response: httpx.Response) -> Optional[dict]:
+    """
+    Read TLS details from the connection httpx already made and verified.
+    Using the same connection avoids a second, unvalidated connection to the target.
+    """
+    network_stream = response.extensions.get("network_stream")
+    if network_stream is None:
+        return None
+    ssl_object = network_stream.get_extra_info("ssl_object")
+    if not isinstance(ssl_object, (ssl.SSLObject, ssl.SSLSocket)):
+        return None  # plain HTTP
+    cipher = ssl_object.cipher()
+    return {
+        "version": ssl_object.version(),
+        "cipher": cipher[0] if cipher else None,
+        "certificate": ssl_object.getpeercert(),
+    }
+
 class SecureHTTPClient:
     """
     A hardened HTTP client for passive security scanning.
@@ -67,12 +105,20 @@ class SecureHTTPClient:
                         status_code=response.status_code,
                         headers=_strip_transport_headers(response.headers),
                         content=bytes(body),
-                        request=response.request
+                        request=response.request,
+                        # TLS details for the TLS analyzer (None for plain HTTP).
+                        extensions={"tls_info": _read_tls_info(response)},
                     )
 
         except httpx.TimeoutException:
             raise SecurityValidationError("The request timed out.")
-        except (httpx.TransportError, ssl.SSLError):
+        except (httpx.TransportError, ssl.SSLError) as e:
+            # A failed certificate check is a scan *result*, not just an error.
+            cert_error = _find_cert_verification_error(e)
+            if cert_error is not None:
+                raise CertificateVerificationError(
+                    cert_error.verify_message or "certificate verification failed"
+                )
             raise SecurityValidationError("A network or TLS error occurred.")
         except Exception as e:
             if isinstance(e, SecurityValidationError):
