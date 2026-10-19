@@ -35,7 +35,7 @@ npm run lint
 | `test_validator.py` | 16 | URL parsing, credentials, ports, DNS results, mixed public/private DNS answers |
 | `test_ssrf.py` | 56 | DNS rebinding against a real loopback server, proxy hijacking, 24 private/special IP addresses (plus 2 invalid strings), unusual IP notations, the port allow-list, the shared connect timeout |
 | `test_analyzers.py` | 48 | Header, cookie and TLS analyzers including edge cases; HTTP client behaviour (gzip bombs, corrupt bodies, redirects, certificate errors) |
-| `test_api.py` | 10 | `/health`, `/scan`, certificate-failure reports, rate limiting, concurrency limit, CORS, URL length, error logging without leaks |
+| `test_api.py` | 15 | `/health`, `/scan`, certificate-failure reports, rate limiting (incl. the trusted proxy IP header and resistance to faked headers), concurrency limit, CORS, URL length, error logging without leaks, security headers on API responses, and that Sentinel Zero's own analyzer finds no header issues in its API |
 | `test_severity_doc.py` | 5 | `docs/SEVERITY.md` lists every finding ID with the same severity as the code |
 | `test_live.py` | 7 | Opt-in: real scans of public sites (skipped by default) |
 
@@ -49,8 +49,9 @@ npm run lint
 - Every security regression test was checked to **fail on the code before the
   fix** and pass after it.
 
-**Result:** 135 passed, 7 live tests deselected. The suite was run 3 times in
-a row with identical results.
+**Result:** 135 passed, 7 live tests deselected, at the time of the
+integration run. The suite was run 3 times in a row with identical results.
+Deployment preparation later added 5 API tests (140 in total).
 
 ## 3. Live API integration results (2026-10-19)
 

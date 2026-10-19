@@ -196,3 +196,74 @@ def test_unexpected_errors_are_logged_but_not_leaked(caplog):
     assert "secret-path" not in response.text
     assert any("Unexpected error" in r.message for r in caplog.records)
     assert any("secret-path" in (r.exc_text or "") or r.exc_info for r in caplog.records)
+
+
+# --- Client IP behind a hosting proxy (e.g. Vercel's x-real-ip) -------------
+
+def _fake_scan_patch():
+    async def fake_scan(url):
+        return {}
+    return patch("app.main._execute_scan", side_effect=fake_scan)
+
+
+def test_trusted_ip_header_gives_each_visitor_their_own_limit():
+    import app.main as main
+    request_history.clear()
+    with patch.object(main, "TRUSTED_CLIENT_IP_HEADER", "x-real-ip"), _fake_scan_patch():
+        # All requests arrive from the same proxy peer ("testclient")...
+        for _ in range(main.RATE_LIMIT_MAX_REQUESTS):
+            assert client.get("/scan?url=https://example.com", headers={"x-real-ip": "203.0.113.7"}).status_code == 200
+        assert client.get("/scan?url=https://example.com", headers={"x-real-ip": "203.0.113.7"}).status_code == 429
+        # ...but a different visitor behind the same proxy is still allowed.
+        assert client.get("/scan?url=https://example.com", headers={"x-real-ip": "198.51.100.9"}).status_code == 200
+    request_history.clear()
+
+
+def test_ip_header_is_ignored_unless_configured():
+    """Without TRUSTED_CLIENT_IP_HEADER, a caller cannot dodge the limit by faking the header."""
+    import app.main as main
+    request_history.clear()
+    with patch.object(main, "TRUSTED_CLIENT_IP_HEADER", None), _fake_scan_patch():
+        for i in range(main.RATE_LIMIT_MAX_REQUESTS):
+            client.get("/scan?url=https://example.com", headers={"x-real-ip": f"203.0.113.{i}"})
+        response = client.get("/scan?url=https://example.com", headers={"x-real-ip": "198.51.100.200"})
+    assert response.status_code == 429
+    request_history.clear()
+
+
+def test_client_ip_for_rejects_malformed_header_values():
+    import app.main as main
+    from starlette.requests import Request
+
+    def request_with(headers):
+        scope = {"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()],
+                 "client": ("10.1.2.3", 1234)}
+        return Request(scope)
+
+    with patch.object(main, "TRUSTED_CLIENT_IP_HEADER", "x-real-ip"):
+        assert main.client_ip_for(request_with({"x-real-ip": "203.0.113.7"})) == "203.0.113.7"
+        assert main.client_ip_for(request_with({"x-real-ip": "203.0.113.7, 10.0.0.1"})) == "203.0.113.7"
+        # Garbage or a missing header falls back to the direct peer address.
+        assert main.client_ip_for(request_with({"x-real-ip": "not-an-ip"})) == "10.1.2.3"
+        assert main.client_ip_for(request_with({})) == "10.1.2.3"
+
+
+# --- Security headers on the API's own responses ----------------------------
+
+def test_api_responses_carry_security_headers():
+    request_history.clear()
+    for response in (client.get("/health"), client.get("/scan?url=ftp://x.example")):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert "max-age=31536000" in response.headers["strict-transport-security"]
+        assert response.headers["content-security-policy"] == "default-src 'none'; frame-ancestors 'none'"
+    # The interactive docs still work: no strict CSP there.
+    docs = client.get("/docs")
+    assert docs.status_code == 200
+    assert "content-security-policy" not in docs.headers
+
+
+def test_sentinel_zero_finds_no_header_issues_in_its_own_api():
+    from app.analyzers.header_check import analyze_headers
+    assert analyze_headers(client.get("/health")) == []

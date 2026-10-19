@@ -1,0 +1,3 @@
+# Everything needed for local development and testing.
+-r requirements.txt
+pytest>=9.1.1,<10

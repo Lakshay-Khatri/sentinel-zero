@@ -148,9 +148,13 @@ sentinel-zero/
 │   ├── SEVERITY.md              # every finding ID, its severity and why
 │   ├── TESTING.md               # how the project is tested + recorded results
 │   ├── VIVA.md                  # presentation and viva preparation guide
+│   ├── DEPLOYMENT.md            # step-by-step Vercel deployment and checks
 │   └── screenshots/
 └── backend/
-    ├── requirements.txt
+    ├── requirements.txt         # runtime packages
+    ├── requirements-dev.txt     # + test tools
+    ├── vercel.json              # Vercel function settings
+    ├── .python-version
     ├── pytest.ini
     ├── app/
     │   ├── main.py              # FastAPI app: /health, /scan, limits, errors
@@ -164,9 +168,10 @@ sentinel-zero/
     │   │   └── cookie_check.py  # cookie attribute findings
     │   └── schemas/
     │       └── report.py        # Severity, Finding, AnalysisReport
-    ├── tests/                   # 135 offline tests + 7 opt-in live tests
+    ├── tests/                   # 140 offline tests + 7 opt-in live tests
     └── frontend/                # React + Vite dashboard
         ├── .env.example
+        ├── vercel.json          # security headers for the deployed site
         └── src/
             ├── pages/DashboardPage.tsx
             ├── components/      # Navbar, Footer, report/* cards and sections
@@ -197,8 +202,10 @@ cd sentinel-zero
 cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 ```
+
+(`requirements-dev.txt` installs the app's packages plus the test tools.)
 
 If PowerShell says running scripts is disabled, run
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then activate
@@ -241,6 +248,7 @@ Open http://localhost:5173 and scan, for example, `https://example.com`.
 | `RATE_LIMIT_MAX_REQUESTS` | `10` | backend | Scans per client IP per minute |
 | `MAX_CONCURRENT_SCANS` | `3` | backend | Scans processed at the same time |
 | `SCAN_TIMEOUT` | `15.0` | backend | Overall time limit per scan, in seconds |
+| `TRUSTED_CLIENT_IP_HEADER` | *(unset)* | backend | Header holding the visitor's real IP behind a hosting proxy (`x-real-ip` on Vercel). Leave unset locally: only use a header the platform overwrites itself |
 
 Backend variables are read from the environment when Uvicorn starts, e.g.
 `$env:RATE_LIMIT_MAX_REQUESTS = "20"` before the start command.
@@ -249,7 +257,7 @@ Backend variables are read from the environment when Uvicorn starts, e.g.
 
 ```powershell
 cd backend
-python -m pytest -v            # 135 offline tests (no internet needed)
+python -m pytest -v            # 140 offline tests (no internet needed)
 python -m pytest -m live -v    # 7 live scans of real websites (needs internet)
 
 cd frontend
@@ -340,8 +348,10 @@ a `CERT_VERIFICATION_FAILED` finding.
 | Probing non-web services | Only ports 80, 443, 8080 and 8443 | `validator.py` |
 | Huge or compressed ("gzip bomb") responses | Response body is never downloaded | `http_client.py` |
 | Slow or stalled targets | Shared 5 s connect budget, 5 s read timeout, 15 s overall limit | `safe_transport.py`, `main.py` |
-| Abuse / overload | Per-IP rate limit and fail-fast concurrency limit | `main.py` |
+| Abuse / overload | Per-IP rate limit and fail-fast concurrency limit; when deployed, a Vercel WAF rate-limit rule | `main.py`, `docs/DEPLOYMENT.md` |
+| Faking an IP to dodge the rate limit | Proxy IP headers are only trusted when `TRUSTED_CLIENT_IP_HEADER` names one the platform overwrites | `main.py` |
 | Leaking secrets in reports | Cookie values hidden; internal errors logged server-side only | `cookie_check.py`, `main.py` |
+| Weak headers on Sentinel Zero itself | Strict headers on the API and the dashboard; tests check that its own analyzer finds nothing | `main.py`, `frontend/vercel.json` |
 | Weakened TLS | Certificate verification always on | `http_client.py`, `safe_transport.py` |
 
 Each defence has automated tests, and the SSRF tests were confirmed to fail
@@ -366,17 +376,20 @@ against the code before the fix.
 
 ## Deployment
 
-The project is **not deployed yet**; deployment is the next planned phase.
-Points that must be handled when it is:
+The project is **prepared for Vercel but not deployed yet**. The plan uses two
+projects from this repository on Vercel's free Hobby plan: the FastAPI backend
+(root `backend`) and the Vite dashboard (root `backend/frontend`).
 
-- The frontend is a static site (`npm run build` produces `dist/`), so it can
-  be hosted on a static host. GitHub Pages cannot run the Python backend, which
-  needs a separate host that supports Python and outbound internet requests.
-- Set `VITE_API_BASE_URL` to the deployed backend URL at build time, and
-  `ALLOWED_ORIGINS` on the backend to the deployed frontend URL.
-- Run a single Uvicorn worker, or replace the in-memory rate limiter.
-- Re-run the SSRF and live tests on the hosting platform to confirm the
-  protections still hold there.
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) has the step-by-step guide,
+environment variables, the rate-limit rule, and a checklist for confirming the
+SSRF protections still hold online. Key points:
+
+- On Vercel, set `TRUSTED_CLIENT_IP_HEADER=x-real-ip` so each visitor gets
+  their own rate limit.
+- Serverless functions can run several copies, so the Vercel WAF rate-limit
+  rule is the main limit; the in-memory limiter is a second layer.
+- The dashboard is served with a strict Content-Security-Policy. It was
+  verified locally to run with zero CSP violations.
 
 ## Future improvements
 

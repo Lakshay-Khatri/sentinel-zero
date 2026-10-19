@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import asyncio
+import ipaddress
 from app.core.validator import validate_target, SecurityValidationError
 from app.core.http_client import SecureHTTPClient, CertificateVerificationError
 from app.analyzers.ssl_check import analyze_ssl, certificate_failure_finding, tls_metadata
@@ -34,6 +35,12 @@ RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "10"))
 RATE_LIMIT_SWEEP_THRESHOLD = 10_000
 request_history: Dict[str, list] = {}
 
+# Behind a hosting proxy, request.client.host is the proxy's address, so every
+# visitor would share one rate limit. Set this to the header the platform uses
+# for the visitor's IP (e.g. "x-real-ip" on Vercel). Only use a header that the
+# platform itself overwrites; otherwise callers could fake their IP. Unset = off.
+TRUSTED_CLIENT_IP_HEADER = os.getenv("TRUSTED_CLIENT_IP_HEADER", "").strip().lower() or None
+
 # Semaphore for concurrency control
 scan_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCANS)
 
@@ -45,16 +52,51 @@ app.add_middleware(
     allow_methods=["GET"],
 )
 
+# The API only returns JSON, so it can use very strict browser protections.
+# (Sentinel Zero scanning its own API should find nothing to report.)
+API_SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+API_CSP = "default-src 'none'; frame-ancestors 'none'"
+# FastAPI's interactive docs load scripts and styles, which the strict CSP would block.
+DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in API_SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if not request.url.path.startswith(DOCS_PATHS):
+        response.headers.setdefault("Content-Security-Policy", API_CSP)
+    return response
+
+
 secure_client = SecureHTTPClient()
+
+
+def client_ip_for(request: Request) -> str:
+    """The visitor's IP: from the trusted proxy header if configured, else the direct peer."""
+    if TRUSTED_CLIENT_IP_HEADER:
+        value = request.headers.get(TRUSTED_CLIENT_IP_HEADER, "").split(",")[0].strip()
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            pass  # missing or malformed: fall back to the direct peer address
+    return request.client.host if request.client else "unknown"
+
 
 async def rate_limiter(request: Request):
     """
     Basic in-memory rate limiter.
-    Note: This only works within a single worker process.
+    Note: This only works within a single worker process. On serverless hosting
+    each instance has its own counts, so pair it with the platform's rate limiting.
     """
-    # Derive client IP safely from the ASGI request.
-    # request.client.host is the immediate peer's IP.
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = client_ip_for(request)
     now = time.time()
 
     # Forget clients whose requests have all expired, so the dict cannot grow forever.
