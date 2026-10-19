@@ -5,26 +5,25 @@ the integration test run on **2026-10-19** (Windows 11, Python 3.14.5).
 
 ## 1. How to run the tests
 
-All commands are for Windows PowerShell.
+All commands are for Windows PowerShell, starting in the `sentinel-zero` folder.
 
-**Backend unit and API tests** (offline, about 10 seconds). Run in `backend\`:
+**Backend unit and API tests** (offline, about 10 seconds):
 
 ```powershell
-cd C:\Users\yogen\sentinel-zero\backend
+cd backend
 python -m pytest -v
 ```
 
-**Live tests** (need internet; real websites are scanned):
+**Live tests** (need internet; real websites are scanned), also in `backend`:
 
 ```powershell
-cd C:\Users\yogen\sentinel-zero\backend
 python -m pytest -m live -v
 ```
 
-**Frontend build and lint.** Run in `backend\frontend\`:
+**Frontend build and lint**, from the `sentinel-zero` folder:
 
 ```powershell
-cd C:\Users\yogen\sentinel-zero\backend\frontend
+cd backend\frontend
 npm run build
 npm run lint
 ```

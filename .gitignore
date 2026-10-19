@@ -1,4 +1,4 @@
-﻿# Secrets and environment variables
+# Secrets and environment variables
 .env
 .env.*
 !.env.example
@@ -19,13 +19,15 @@ node_modules/
 dist/
 build/
 
-# Editors and operating system
+# Editors, local tool settings and operating system
+/.claude/
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# Temporary debugging and patch scripts
+# Temporary debugging and patch scripts, editor backups
+*.bak
 backend/cleanup_debug.py
 backend/debug_v2.py
 backend/debug_v3.py
