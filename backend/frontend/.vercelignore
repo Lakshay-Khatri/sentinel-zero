@@ -1,0 +1,7 @@
+# Local settings and secrets: the production API URL is set in Vercel instead.
+.env*
+.vercel/
+
+# Installed and built on Vercel, never uploaded.
+node_modules/
+dist/

@@ -1,0 +1,13 @@
+# Local secrets and Vercel CLI state: never upload.
+.env*
+.vercel/
+
+# Not needed by the deployed API (the dashboard is deployed as its own project).
+frontend/
+tests/
+pytest.ini
+requirements-dev.txt
+.venv/
+__pycache__/
+.pytest_cache/
+*.bak

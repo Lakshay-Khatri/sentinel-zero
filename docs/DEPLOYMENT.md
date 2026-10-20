@@ -1,8 +1,19 @@
 # Sentinel Zero — Deploying to Vercel
 
-**Status: prepared, not yet deployed.** This guide explains how to deploy
-Sentinel Zero on Vercel's free Hobby plan and how to check that its security
-protections still work once it is online.
+**Status: deployed on 2026-10-20.**
+
+| Part | URL | Vercel project |
+|---|---|---|
+| Dashboard | https://sentinel-zero-ten.vercel.app | `sentinel-zero` (root `backend/frontend`) |
+| API | https://sentinel-zero-api.vercel.app | `sentinel-zero-api` (root `backend`) |
+
+Both were deployed with the Vercel CLI (`vercel deploy --prod`, run in each
+project folder). The frontend CSP already names the exact API URL, and the
+rate-limit rule (step 5) was created with `vercel firewall rules add` and
+published. Live verification results are in [TESTING.md](TESTING.md).
+
+This guide explains how the deployment was done, how to repeat it, and how to
+check that the security protections still work online.
 
 ## 1. Why Vercel, and what to know first
 
@@ -108,6 +119,20 @@ Record the results in `docs/TESTING.md`, like the local integration run.
 
 ## 7. Updating later
 
-Every push to `main` redeploys both projects automatically. Pushes to other
-branches create *preview* deployments, which Vercel protects with a login by
-default.
+The projects are not connected to GitHub yet, so pushing does **not**
+redeploy. To publish changes, run this in each folder (`backend`, then
+`backend\frontend`):
+
+```powershell
+npx vercel@latest deploy --prod
+```
+
+**Optional, automatic deploys:** connect the repository in each Vercel
+project (Settings → Git). This needs Vercel's GitHub app installed on the
+repository, which only the repository owner can approve. After that, every
+push to `main` redeploys, and other branches get *preview* deployments, which
+Vercel protects with a login by default.
+
+**Local files created by the CLI.** `.vercel/` (project link) and `.env.local`
+(a short-lived Vercel token) are created in each folder. Both are git-ignored
+and listed in `.vercelignore`, so they are never committed or uploaded.

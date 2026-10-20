@@ -120,7 +120,27 @@ Checked in a browser against the running backend:
 | A host with several unreachable IPs took the 5 s connect timeout once per IP (10.7 s for `example.com:8443`). | One shared time budget for DNS and all connection attempts (5.6 s). Regression test: `test_connect_timeout_is_shared_across_all_resolved_ips`. |
 | Two unit tests made real network connections and would fail offline. | Patched the correct names, and replaced the real connection with a recorder. |
 
-## 6. Known gaps
+## 6. Live deployment results (2026-10-20)
+
+Run against the Vercel deployment (dashboard
+https://sentinel-zero-ten.vercel.app, API https://sentinel-zero-api.vercel.app):
+
+| Check | Result |
+|---|---|
+| `/health` | 200 `{"status":"healthy"}` |
+| Scan `https://example.com` via the API | 5 findings, TLSv1.3, certificate details, same as locally |
+| Scan `https://github.com` from the live dashboard | 2 findings with TLS details; status "System Operational"; **0 CSP violations** |
+| `http://169.254.169.254/latest/meta-data/` (cloud metadata) | 400, "non-public IP" |
+| `http://127.0.0.1:9001/...` (Vercel's internal runtime API) | 400, port not allowed |
+| `http://localhost/`, `http://10.0.0.1/`, `http://[::1]/` | 400, "non-public IP" |
+| `https://example.com:22` | 400, port not allowed |
+| Dashboard origin allowed by CORS | `access-control-allow-origin: https://sentinel-zero-ten.vercel.app` |
+| Sentinel Zero scanning its own dashboard | **No findings**, TLSv1.3 |
+| Sentinel Zero scanning its own API | **No findings**, TLSv1.3 |
+| 14 quick requests, before the firewall rule | 10 processed, then 429 from the app's own limiter (visitor IP from `x-real-ip`) |
+| 14 quick requests, after the firewall rule | 10 processed, then 429 from **Vercel's firewall** (`x-vercel-mitigated: deny`), before reaching the app |
+
+## 7. Known gaps
 
 - There are no automated frontend tests (e.g. Vitest or Playwright). The
   frontend checks above were done in a browser by hand.

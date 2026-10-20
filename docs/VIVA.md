@@ -337,5 +337,5 @@ export, automated frontend tests, and deployment with a shared rate limiter.
 - Only one response is analysed; redirects are not followed.
 - Only the negotiated TLS version is visible.
 - Cookie sensitivity is a name-based guess.
-- The project is prepared for Vercel but not yet deployed publicly (see
+- The project is deployed on Vercel's free plan (see
   [DEPLOYMENT.md](DEPLOYMENT.md)).

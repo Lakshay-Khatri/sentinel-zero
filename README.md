@@ -11,6 +11,9 @@ exploit payloads.
 
 > B.Tech cybersecurity project by Lakshay Khatri.
 
+**Live demo:** https://sentinel-zero-ten.vercel.app ·
+**API:** https://sentinel-zero-api.vercel.app/health
+
 ![Scan report for github.com](docs/screenshots/report-desktop.jpg)
 
 ---
@@ -376,20 +379,22 @@ against the code before the fix.
 
 ## Deployment
 
-The project is **prepared for Vercel but not deployed yet**. The plan uses two
-projects from this repository on Vercel's free Hobby plan: the FastAPI backend
-(root `backend`) and the Vite dashboard (root `backend/frontend`).
+Sentinel Zero is **deployed on Vercel's free Hobby plan** as two projects from
+this repository:
+
+| Part | URL | Vercel project root |
+|---|---|---|
+| Dashboard | https://sentinel-zero-ten.vercel.app | `backend/frontend` |
+| API | https://sentinel-zero-api.vercel.app | `backend` |
+
+Verified live on 2026-10-20 (details in [docs/TESTING.md](docs/TESTING.md)):
+real scans work from the dashboard; cloud metadata, `localhost`, private
+ranges and Vercel's internal runtime API are all refused; a Vercel firewall
+rule limits scans to 10 per minute per IP; and Sentinel Zero finds **no
+issues** when it scans its own dashboard and API.
 
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) has the step-by-step guide,
-environment variables, the rate-limit rule, and a checklist for confirming the
-SSRF protections still hold online. Key points:
-
-- On Vercel, set `TRUSTED_CLIENT_IP_HEADER=x-real-ip` so each visitor gets
-  their own rate limit.
-- Serverless functions can run several copies, so the Vercel WAF rate-limit
-  rule is the main limit; the in-memory limiter is a second layer.
-- The dashboard is served with a strict Content-Security-Policy. It was
-  verified locally to run with zero CSP violations.
+environment variables and the full verification checklist.
 
 ## Future improvements
 
